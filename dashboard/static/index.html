@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridGain Multi-DC Console</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c232c; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --blue:#58a6ff; --violet:#bc8cff; --orange:#f0883e;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:18px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .sub{color:var(--dim)}
+  .kpi{display:flex;gap:16px;margin-left:auto}
+  .kpi div{text-align:right}.kpi b{display:block;font-size:17px;font-family:var(--mono)}.kpi span{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--blue)} button.danger{border-color:#6e2a2a;color:#ff9b94} button.danger:hover{background:#3a1a1a;border-color:var(--bad)}
+  button.good{border-color:#245a30;color:#7ee787}button.good:hover{background:#12301a;border-color:var(--ok)}
+  button.sm{padding:1px 8px}
+  main{padding:18px;max-width:1700px;margin:0 auto}
+  #stage{position:relative;padding:62px 0 90px}
+  #links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+  #links .lbl{pointer-events:auto;cursor:pointer}
+  #grid{display:grid;grid-template-columns:repeat(3,minmax(300px,1fr));gap:150px;position:relative;z-index:2}
+  .dc{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;transition:border-color .3s, opacity .3s}
+  .dc.s-HEALTHY{border-top:3px solid var(--ok)} .dc.s-DEGRADED{border-top:3px solid var(--warn)}
+  .dc.s-UNAVAILABLE,.dc.s-DCDOWN,.dc.s-UNREACHABLE{border-top:3px solid var(--bad)} .dc.s-ISOLATED{border-top:3px solid var(--violet)}
+  .dc.s-DCDOWN{opacity:.85}
+  .dc h2{margin:0;font-size:15px;display:flex;align-items:center;gap:8px}
+  .dc h2 small{color:var(--dim);font-weight:400;font-family:var(--mono)}
+  .pill{margin-left:auto;font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;letter-spacing:.4px}
+  .p-HEALTHY{background:#12301a;color:var(--ok)} .p-DEGRADED{background:#3a2d0b;color:var(--warn)}
+  .p-UNAVAILABLE,.p-DCDOWN,.p-UNREACHABLE{background:#3a1a1a;color:var(--bad)} .p-ISOLATED{background:#2a1f45;color:var(--violet)}
+  .blk{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  .blk .t{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+  .blk .t .r{margin-left:auto;display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline}
+  .m b{font-family:var(--mono);font-size:16px}.m span{color:var(--dim);font-size:11px;margin-left:2px}
+  .bad{color:var(--bad)}.warn{color:var(--warn)}.ok{color:var(--ok)}.dim{color:var(--dim)}
+  .arrow{text-align:center;color:var(--dim);line-height:.6;font-size:12px;margin:-4px 0}
+  .pods{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}
+  .pod{width:26px;height:22px;border-radius:5px;background:#12301a;border:1px solid var(--ok);display:grid;place-items:center;font:10px var(--mono);color:var(--ok)}
+  .pod.x{background:#3a1a1a;border-color:var(--bad);color:var(--bad)} .pod.w{background:#3a2d0b;border-color:var(--warn);color:var(--warn)}
+  .nodes{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 2px}
+  .node{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font:600 12px var(--mono);cursor:pointer;border:2px solid;position:relative;user-select:none;transition:transform .1s}
+  .node:hover{transform:scale(1.12)}
+  .node.UP{background:#12301a;border-color:var(--ok);color:var(--ok)}
+  .node.STARTING,.node.PENDING{background:#3a2d0b;border-color:var(--warn);color:var(--warn);animation:pulse 1s infinite}
+  .node.FAILED,.node.STOPPING{background:#3a1a1a;border-color:var(--bad);color:var(--bad);text-decoration:line-through}
+  .node.cmg::after{content:"";position:absolute;inset:-6px;border:1px dashed var(--blue);border-radius:50%;opacity:.7}
+  @keyframes pulse{50%{opacity:.45}}
+  .spark{width:100%;height:30px;display:block;margin-top:4px}
+  input[type=range]{width:100%;accent-color:var(--blue);margin:2px 0}
+  .btns{display:flex;gap:6px;flex-wrap:wrap}
+  .rep{display:flex;flex-direction:column;gap:2px;font-size:12px;font-family:var(--mono)}
+  .chip{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;font-weight:600}
+  .c-REPLICATING{background:#12301a;color:var(--ok)}.c-STOPPED,.c-WORKER_NODE_OUT,.c-NONE{background:#3a2d0b;color:var(--warn)}.c-FAILED{background:#3a1a1a;color:var(--bad)}
+  section{margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  section h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim)}
+  .linkrow{display:grid;grid-template-columns:150px 1fr 70px 190px 1fr 110px;gap:12px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+  .linkrow:first-of-type{border-top:0}
+  .linkrow.sel{background:#1b2636;border-radius:6px}
+  table{border-collapse:collapse;font-family:var(--mono)}td,th{padding:4px 14px;text-align:right}th{color:var(--dim);font-weight:500}td:first-child,th:first-child{text-align:left}
+  td.lag{color:var(--warn)}
+  #log{height:150px;overflow:auto;font:12px var(--mono);color:var(--dim)} #log div{padding:1px 0} #log b{color:var(--text);font-weight:500} #log .e{color:var(--bad)} #log .g{color:var(--ok)} #log .w{color:var(--warn)}
+  .flow{stroke-dasharray:6 10;animation:dash 0.7s linear infinite} .flow.slow{animation-duration:2s}
+  @keyframes dash{to{stroke-dashoffset:-16}}
+  .legend{display:flex;gap:16px;color:var(--dim);font-size:11px;margin-top:8px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:18px;border-top:2px solid;vertical-align:middle;margin-right:5px}
+  @media (max-width:1300px){#grid{gap:60px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>GridGain 9.2 · Multi-DC Active/Active <span class="sub">— payments HA &amp; DR demo</span></h1>
+  <button id="resetAll" class="good" title="Heal all links and bring every DC back">Reset all</button>
+  <div class="kpi">
+    <div><b id="k-ok">0</b><span>payments/s</span></div>
+    <div><b id="k-err">0</b><span>errors/s</span></div>
+    <div><b id="k-p99">0</b><span>worst p99 ms</span></div>
+    <div><b id="k-dcs">0/3</b><span>DCs serving</span></div>
+  </div>
+</header>
+<main>
+  <div id="stage">
+    <svg id="links"></svg>
+    <div id="grid"></div>
+  </div>
+  <div class="legend">
+    <span><i style="border-color:var(--ok)"></i>replication (DCR) healthy</span>
+    <span><i style="border-color:var(--warn)"></i>replication lagging</span>
+    <span><i style="border-color:var(--bad);border-top-style:dashed"></i>link partitioned</span>
+    <span><i style="border-color:var(--orange);border-top-style:dashed"></i>user traffic failing over to another DC</span>
+    <span>dashed ring = CMG / Metastorage member</span>
+  </div>
+
+  <section>
+    <h3>Inter-DC links — latency &amp; partitions (applied to DCR replication and failover traffic)</h3>
+    <div id="linkpanel"></div>
+  </section>
+
+  <section>
+    <h3>Data convergence — payments visible in each DC, by originating DC</h3>
+    <div id="conv"></div>
+  </section>
+
+  <section>
+    <h3>Event log</h3>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+let S = null, DCS = [];
+const hist = {};            // dc -> {rps:[], p99:[]}
+const prev = {};            // for event-diffing
+const dragging = new Set();
+
+// ------------------------------------------------------------------ helpers
+const fmt = (n, d=0) => (n==null||isNaN(n)) ? '–' : Number(n).toFixed(d);
+const dcName = id => (DCS.find(d => d.dc.id === id)?.dc.name) || id;
+function log(msg, cls='') {
+  const el = $('#log'); const t = new Date().toLocaleTimeString();
+  const d = document.createElement('div'); d.className = cls; d.innerHTML = `${t}  ${msg}`;
+  el.prepend(d); while (el.children.length > 120) el.lastChild.remove();
+}
+async function act(body, label) {
+  log(`<b>${label || body.op}</b> → ${body.dc || ''}`, 'w');
+  try {
+    const r = await fetch('/api/action', {method:'POST', body: JSON.stringify(body)});
+    if (!r.ok) { const e = await r.json().catch(()=>({})); log(`action failed: ${e.error||r.status}`, 'e'); }
+  } catch (e) { log('action failed: ' + e, 'e'); }
+  setTimeout(tick, 300);
+}
+const peerIds = id => DCS.map(d => d.dc.id).filter(x => x !== id);
+
+function dcStatus(d) {
+  if (!d.reachable) return 'UNREACHABLE';
+  const s = d.status;
+  if (s.dcFailed) return 'DCDOWN';
+  const peers = peerIds(d.dc.id);
+  if (peers.length && s.wan && peers.every(p => s.wan[p]?.down)) return 'ISOLATED';
+  return s.cluster?.status || 'UNAVAILABLE';
+}
+const statusLabel = k => ({DCDOWN:'DC DOWN'}[k] || k);
+function replState(d, peer) {
+  const rows = d.status?.dcr?.replications || [];
+  const r = rows.find(r => (r.name||'') === 'from_' + peer);
+  if (!r) return 'NONE';
+  return (r.status || r.state || 'UNKNOWN').toUpperCase();
+}
+
+// ------------------------------------------------------------------ skeleton (built once)
+function build() {
+  const g = $('#grid'); g.innerHTML = '';
+  for (const d of DCS) {
+    const id = d.dc.id;
+    const el = document.createElement('div'); el.className = 'dc'; el.id = 'dc-' + id;
+    el.innerHTML = `
+      <h2><span>${d.dc.name}</span><small>${id} · ${d.dc.hostIp}</small><span class="pill" id="${id}-pill"></span></h2>
+
+      <div class="blk" id="${id}-users"><div class="t">Users (load generator)<span class="r"><span id="${id}-tpsv" class="dim"></span></span></div>
+        <input type="range" min="0" max="600" step="10" value="100" id="${id}-tps">
+        <div class="row"><div class="m"><b id="${id}-uok">0</b><span>ok/s</span></div><div class="m"><b id="${id}-uerr">0</b><span>err/s</span></div><div class="m"><b id="${id}-up99">0</b><span>p99 ms</span></div></div>
+        <div class="dim" id="${id}-served" style="font-size:11px;margin-top:2px"></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="blk" id="${id}-lb"><div class="t">Load balancer<span class="r"><span id="${id}-lbmode"></span></span></div>
+        <div class="row"><div class="m"><b id="${id}-lrps">0</b><span>req/s</span></div><div class="m"><b id="${id}-lp50">0</b><span>p50 ms</span></div><div class="m"><b id="${id}-lp99">0</b><span>p99 ms</span></div><div class="m"><b id="${id}-lerr">0</b><span>err/s</span></div></div>
+        <svg class="spark" id="${id}-spark" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
+        <div class="dim" id="${id}-lbnote" style="font-size:11px"></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="blk"><div class="t">Payments API pods<span class="r"><button class="sm" id="${id}-appm">−</button><span id="${id}-appn" class="dim"></span><button class="sm" id="${id}-appp">+</button></span></div>
+        <div class="pods" id="${id}-pods"></div>
+      </div>
+      <div class="arrow">▼ local reads/writes only</div>
+      <div class="blk" id="${id}-gg"><div class="t">GridGain 9.2 cluster<span class="r"><button class="sm" id="${id}-nm">−</button><span id="${id}-nn" class="dim"></span><button class="sm" id="${id}-np">+</button></span></div>
+        <div class="nodes" id="${id}-nodes"></div>
+        <div class="dim" id="${id}-cl" style="font-size:11px"></div>
+      </div>
+      <div class="blk"><div class="t">Replication in (DCR)</div><div class="rep" id="${id}-rep"></div></div>
+      <div class="btns">
+        <button class="danger" id="${id}-fail">Fail DC</button><button class="good" id="${id}-rec">Recover DC</button>
+        <button class="danger" id="${id}-iso">Isolate (partition)</button><button class="good" id="${id}-heal">Heal network</button>
+      </div>`;
+    g.appendChild(el);
+    $(`#${id}-fail`).onclick = () => act({op:'failDC', dc:id}, 'FAIL DC');
+    $(`#${id}-rec`).onclick  = () => act({op:'recoverDC', dc:id}, 'RECOVER DC');
+    $(`#${id}-iso`).onclick  = () => act({op:'isolateDC', dc:id}, 'ISOLATE DC');
+    $(`#${id}-heal`).onclick = () => act({op:'healDC', dc:id}, 'HEAL NETWORK');
+    $(`#${id}-nm`).onclick = () => act({op:'scaleNodes', dc:id, n:(cur(id,'cluster')?.desiredNodes||3)-1}, 'scale GridGain nodes');
+    $(`#${id}-np`).onclick = () => act({op:'scaleNodes', dc:id, n:(cur(id,'cluster')?.desiredNodes||3)+1}, 'scale GridGain nodes');
+    $(`#${id}-appm`).onclick = () => act({op:'scaleApps', dc:id, n:(cur(id,'replicas')?.['payments-api']??3)-1}, 'scale API pods');
+    $(`#${id}-appp`).onclick = () => act({op:'scaleApps', dc:id, n:(cur(id,'replicas')?.['payments-api']??3)+1}, 'scale API pods');
+    const sl = $(`#${id}-tps`);
+    sl.oninput = () => { dragging.add(sl.id); $(`#${id}-tpsv`).textContent = 'target ' + sl.value + ' tps'; };
+    sl.onchange = () => { act({op:'setLoad', dc:id, tps:+sl.value}, 'set load ' + sl.value + ' tps'); setTimeout(()=>dragging.delete(sl.id), 1500); };
+    hist[id] = {rps:[], p99:[]};
+  }
+  // link rows
+  const lp = $('#linkpanel'); lp.innerHTML = '';
+  const ids = DCS.map(d => d.dc.id);
+  for (let i = 0; i < ids.length; i++) for (let j = i+1; j < ids.length; j++) {
+    const a = ids[i], b = ids[j], k = `${a}-${b}`;
+    const row = document.createElement('div'); row.className = 'linkrow'; row.id = 'lr-' + k;
+    row.innerHTML = `<div><b>${dcName(a)} ↔ ${dcName(b)}</b></div>
+      <div><input type="range" min="0" max="400" step="5" id="rtt-${k}"></div>
+      <div class="m"><b id="rttv-${k}">–</b><span>ms RTT</span></div>
+      <div class="rep" id="lagv-${k}"></div>
+      <div class="rep" id="dcrv-${k}"></div>
+      <div class="btns"><button id="part-${k}" class="danger">Partition</button></div>`;
+    lp.appendChild(row);
+    const sl = $(`#rtt-${k}`);
+    sl.oninput = () => { dragging.add(sl.id); $(`#rttv-${k}`).textContent = sl.value; };
+    sl.onchange = () => { act({op:'setLatency', a, b, rttMs:+sl.value}, `latency ${a}↔${b} = ${sl.value}ms`); setTimeout(()=>dragging.delete(sl.id), 1500); };
+    $(`#part-${k}`).onclick = () => { const down = !(linkInfo(a,b).down); act({op:'setLinkDown', a, b, down}, (down?'PARTITION ':'HEAL ') + `${a}↔${b}`); };
+  }
+}
+const cur = (id, key) => DCS.find(d => d.dc.id === id)?.status?.[key];
+function linkInfo(a, b) {
+  const da = DCS.find(d => d.dc.id === a)?.status?.wan?.[b] || {};
+  const db = DCS.find(d => d.dc.id === b)?.status?.wan?.[a] || {};
+  return {rtt: Math.max(da.rttMs ?? 0, db.rttMs ?? 0), down: !!(da.down || db.down)};
+}
+
+// ------------------------------------------------------------------ update
+function spark(id, arr) {
+  const svg = $(`#${id}-spark`); if (!arr.length) return;
+  const max = Math.max(10, ...arr), w = 200, h = 30;
+  const pts = arr.map((v, i) => `${(i/(60-1))*w},${h - 2 - (v/max)*(h-4)}`).join(' ');
+  svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="var(--blue)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
+}
+
+function update() {
+  let totOk = 0, totErr = 0, worst = 0, serving = 0;
+  for (const d of DCS) {
+    const id = d.dc.id, s = d.status || {}, st = dcStatus(d);
+    const el = $('#dc-' + id); el.className = 'dc s-' + st;
+    const pill = $(`#${id}-pill`); pill.className = 'pill p-' + st; pill.textContent = statusLabel(st);
+    const lg = s.loadgen || {}, lb = s.lb || {}, cl = s.cluster || {};
+    if (!dragging.has(`${id}-tps`)) { const sl = $(`#${id}-tps`); if (lg.targetTps != null) { sl.value = lg.targetTps; $(`#${id}-tpsv`).textContent = 'target ' + lg.targetTps + ' tps'; } }
+    $(`#${id}-uok`).textContent = fmt(lg.okRps, 0); $(`#${id}-uerr`).textContent = fmt(lg.errRps, 1);
+    $(`#${id}-uerr`).className = lg.errRps > 0.5 ? 'bad' : ''; $(`#${id}-up99`).textContent = fmt(lg.p99ms, 0);
+    const sb = Object.entries(lg.servedByDC || {}).filter(([,v]) => v > 0.2).map(([k,v]) => `${k}: ${fmt(v)}/s`).join(' · ');
+    $(`#${id}-served`).textContent = sb ? 'served by → ' + sb : '';
+    totOk += lg.okRps || 0; totErr += lg.errRps || 0; worst = Math.max(worst, lg.p99ms || 0);
+    if ((lg.okRps||0) > 0.5) serving++;
+
+    $(`#${id}-lrps`).textContent = fmt(lb.rps, 0); $(`#${id}-lp50`).textContent = fmt(lb.p50ms, 0);
+    $(`#${id}-lp99`).textContent = fmt(lb.p99ms, 0); $(`#${id}-lerr`).textContent = fmt(lb.errRps, 1);
+    $(`#${id}-lerr`).className = lb.errRps > 0.5 ? 'bad' : '';
+    const fo = lb.mode === 'failover';
+    $(`#${id}-lbmode`).innerHTML = lb.mode ? (fo ? '<span class="warn">FAILOVER → remote DCs</span>' : '<span class="ok">NORMAL</span>') : '';
+    const notes = [];
+    if (lb.failoverOutRps > 0.3) notes.push(`↗ failing over ${fmt(lb.failoverOutRps)}/s to ` + Object.keys(lb.failoverOutTo||{}).join(','));
+    if (lb.servedForRemoteRps > 0.3) notes.push(`↙ serving ${fmt(lb.servedForRemoteRps)}/s for ` + Object.keys(lb.servedForRemoteFrom||{}).join(','));
+    notes.push(`${lb.healthyBackends ?? 0} healthy backend(s)`);
+    $(`#${id}-lbnote`).textContent = notes.join(' · ');
+    const h = hist[id]; h.rps.push(lb.rps || 0); if (h.rps.length > 60) h.rps.shift(); spark(id, h.rps);
+
+    const apps = s.apps || [];
+    $(`#${id}-appn`).textContent = (s.replicas?.['payments-api'] ?? '–') + ' pods';
+    $(`#${id}-pods`).innerHTML = apps.map(p => `<div class="pod ${p.ready?'':(p.status==='STARTING'?'w':'x')}" title="${p.name}\n${p.ip}\n${p.ready? fmt(p.metrics?.tps,0)+' tps':p.status}">${p.name.slice(-2)}</div>`).join('') || '<span class="dim">none running</span>';
+
+    $(`#${id}-nn`).textContent = `${cl.readyNodes ?? 0}/${cl.desiredNodes ?? '–'} nodes`;
+    $(`#${id}-nodes`).innerHTML = (s.gg || []).map((p, i) =>
+      `<div class="node ${p.status} ${i<3?'cmg':''}" data-pod="${p.name}" data-st="${p.status}" title="${p.name} (${p.ip||'-'})\n${p.status}${p.restarts?'\nrestarts: '+p.restarts:''}\nclick to ${p.status==='FAILED'?'recover':'kill'} this node">${p.name.split('-')[1]}</div>`).join('');
+    $(`#${id}-nodes`).querySelectorAll('.node').forEach(n => n.onclick = () => {
+      const failed = n.dataset.st === 'FAILED';
+      act({op: failed ? 'recoverNode' : 'failNode', dc: id, name: n.dataset.pod}, (failed ? 'RECOVER node ' : 'KILL node ') + n.dataset.pod);
+    });
+    $(`#${id}-cl`).textContent = d.reachable ? `${cl.status || '?'} · logical topology ${cl.logicalNodes ?? '–'} · CMG quorum ${cl.cmgReady ?? 0}/3` : (d.error || 'agent unreachable');
+
+    $(`#${id}-rep`).innerHTML = peerIds(id).map(p => {
+      const rs = replState(d, p), lag = s.repLagMs?.[p];
+      const lc = lag == null ? 'dim' : lag > 1500 ? 'bad' : lag > 400 ? 'warn' : 'ok';
+      return `<div><span class="chip c-${rs}">${rs}</span> ← ${p} <span class="${lc}">lag ${lag==null?'–':fmt(lag)+' ms'}</span></div>`;
+    }).join('');
+
+    // events
+    const pv = prev[id] || {};
+    if (pv.st && pv.st !== st) log(`<b>${dcName(id)}</b> is now <b>${statusLabel(st)}</b>`, st==='HEALTHY'?'g':(st==='DEGRADED'?'w':'e'));
+    for (const p of (s.gg||[])) { const k = 'n'+p.name; if (pv[k] && pv[k] !== p.status) log(`${id}/${p.name} ${pv[k]} → <b>${p.status}</b>`, p.status==='UP'?'g':(p.status==='FAILED'?'e':'w')); pv[k] = p.status; }
+    if (pv.mode && lb.mode && pv.mode !== lb.mode) log(`${id} load balancer ${lb.mode==='failover'?'<b>failing over</b> to remote DCs':'back to <b>local</b> backends'}`, lb.mode==='failover'?'w':'g');
+    pv.st = st; pv.mode = lb.mode; prev[id] = pv;
+  }
+  $('#k-ok').textContent = fmt(totOk, 0); $('#k-err').textContent = fmt(totErr, 1);
+  $('#k-err').style.color = totErr > 0.5 ? 'var(--bad)' : ''; $('#k-p99').textContent = fmt(worst, 0);
+  $('#k-dcs').textContent = `${serving}/${DCS.length}`;
+
+  // link panel
+  const ids = DCS.map(d => d.dc.id);
+  for (let i = 0; i < ids.length; i++) for (let j = i+1; j < ids.length; j++) {
+    const a = ids[i], b = ids[j], k = `${a}-${b}`, li = linkInfo(a, b);
+    const sl = $(`#rtt-${k}`); if (!dragging.has(sl.id)) { sl.value = li.rtt; $(`#rttv-${k}`).textContent = li.rtt; }
+    const la = cur(a,'repLagMs')?.[b], lb_ = cur(b,'repLagMs')?.[a];
+    const lc = v => v == null ? '<span class="dim">–</span>' : `<span class="${v>1500?'bad':v>400?'warn':'ok'}">${fmt(v)} ms</span>`;
+    $(`#lagv-${k}`).innerHTML = `<div>${a} ← ${b}: ${lc(la)}</div><div>${b} ← ${a}: ${lc(lb_)}</div>`;
+    const da = DCS.find(d => d.dc.id === a), db = DCS.find(d => d.dc.id === b);
+    $(`#dcrv-${k}`).innerHTML = `<div>${a}: <span class="chip c-${replState(da,b)}">${replState(da,b)}</span></div><div>${b}: <span class="chip c-${replState(db,a)}">${replState(db,a)}</span></div>`;
+    const pb = $(`#part-${k}`); pb.textContent = li.down ? 'Heal link' : 'Partition'; pb.className = li.down ? 'good' : 'danger';
+    $(`#lr-${k}`).style.opacity = li.down ? .75 : 1;
+  }
+
+  // convergence matrix: each origin DC's own count is the reference; a cell shows how far another DC's view is from it
+  const origins = ids;
+  let html = '<table><tr><th>rows visible in ↓ / originated in →</th>' + origins.map(o => `<th>${o}</th>`).join('') + '<th>total</th></tr>';
+  const truth = {}; origins.forEach(o => truth[o] = DCS.find(d => d.dc.id === o)?.status?.stats?.paymentsByOrigin?.[o] || 0);
+  for (const d of DCS) {
+    const pbo = d.status?.stats?.paymentsByOrigin || {}; let tot = 0;
+    html += `<tr><td>${d.dc.id} (${d.dc.name})</td>` + origins.map(o => {
+      const v = pbo[o] || 0; tot += v; const diff = v - truth[o]; const own = d.dc.id === o;
+      const cls = !own && Math.abs(diff) > 60 ? 'lag' : '';
+      const tip = own ? 'origin (reference)' : diff < 0 ? `${-diff} rows not yet replicated here` : diff > 0 ? `${diff} expired rows not yet deleted here` : 'in sync';
+      return `<td class="${cls}" title="${tip}">${v.toLocaleString()}${!own && diff ? ` <small>(${diff>0?'+':''}${diff})</small>` : ''}</td>`;
+    }).join('') + `<td>${tot.toLocaleString()}</td></tr>`;
+  }
+  $('#conv').innerHTML = html + '</table><div class="dim" style="margin-top:6px;font-size:11px">Counts are the payments currently retained (90 s window). (−n) = rows still to arrive from the origin DC; (+n) = expired rows whose delete has not replicated yet.</div>';
+  drawLinks();
+}
+
+// ------------------------------------------------------------------ topology overlay
+function rel(el) { const r = el.getBoundingClientRect(), s = $('#stage').getBoundingClientRect(); return {x:r.left-s.left, y:r.top-s.top, w:r.width, h:r.height, cx:r.left-s.left+r.width/2, cy:r.top-s.top+r.height/2, r:r.right-s.left, b:r.bottom-s.top}; }
+function drawLinks() {
+  const svg = $('#links'); const ids = DCS.map(d => d.dc.id); if (!DCS.length) return;
+  const stg = $('#stage').getBoundingClientRect(); svg.setAttribute('viewBox', `0 0 ${stg.width} ${stg.height}`);
+  let out = '';
+  const label = (x, y, lines, color, k) => {
+    const w = 128, h = 14 * lines.length + 8;
+    return `<g class="lbl" transform="translate(${x - w/2},${y - h/2})" onclick="document.getElementById('lr-${k}').scrollIntoView({behavior:'smooth',block:'center'})"><rect width="${w}" height="${h}" rx="6" fill="#0d1117" stroke="${color}" stroke-opacity=".8"/>` +
+      lines.map((t,i) => `<text x="${w/2}" y="${15+14*i}" text-anchor="middle" font-size="11" font-family="ui-monospace,Menlo,monospace" fill="${i? '#8b949e':'#e6edf3'}">${t}</text>`).join('') + '</g>';
+  };
+  for (let i = 0; i < ids.length; i++) for (let j = i+1; j < ids.length; j++) {
+    const a = ids[i], b = ids[j], k = `${a}-${b}`, li = linkInfo(a, b);
+    const ea = $(`#${a}-gg`), eb = $(`#${b}-gg`); if (!ea || !eb) continue;
+    const A = rel(ea), B = rel(eb);
+    const la = cur(a,'repLagMs')?.[b], lb_ = cur(b,'repLagMs')?.[a];
+    const worst = Math.max(la ?? 0, lb_ ?? 0);
+    const color = li.down ? '#f85149' : worst > 1500 ? '#f85149' : worst > 400 ? '#d29922' : '#3fb950';
+    const adj = j === i + 1;
+    let d1, d2, mx, my;
+    if (adj) {                       // straight, two lanes (one per replication direction)
+      const y1 = A.cy - 5, y2 = A.cy + 5;
+      d1 = `M${A.r},${y1} L${B.x},${y1}`; d2 = `M${B.x},${y2} L${A.r},${y2}`; mx = (A.r + B.x) / 2; my = A.cy;
+    } else {                         // dc1 ↔ dc3: arc underneath the middle DC
+      const dip = stg.height - 22, y0 = A.b;
+      d1 = `M${A.cx-6},${y0} C${A.cx-6},${dip} ${B.cx-6},${dip} ${B.cx-6},${y0}`;
+      d2 = `M${B.cx+6},${y0} C${B.cx+6},${dip+10} ${A.cx+6},${dip+10} ${A.cx+6},${y0}`; mx = (A.cx + B.cx) / 2; my = dip - 4;
+    }
+    const cls = li.down ? '' : 'flow' + (worst > 400 ? ' slow' : '');
+    out += `<path d="${d1}" fill="none" stroke="${color}" stroke-width="2.5" class="${cls}" ${li.down?'stroke-dasharray="3 7"':''} opacity="${li.down?.7:.9}"/>`;
+    out += `<path d="${d2}" fill="none" stroke="${color}" stroke-width="2.5" class="${cls}" ${li.down?'stroke-dasharray="3 7"':''} opacity="${li.down?.7:.9}"/>`;
+    out += label(mx, my, [li.down ? '✕ PARTITIONED' : `${li.rtt} ms RTT`, `lag ${la==null?'–':fmt(la)} / ${lb_==null?'–':fmt(lb_)} ms`], color, k);
+  }
+  // user traffic failing over, LB → remote LB (arcs above the cards)
+  for (const d of DCS) {
+    const lb = d.status?.lb; if (!lb || !(lb.failoverOutRps > 0.3)) continue;
+    for (const [to, rate] of Object.entries(lb.failoverOutTo || {})) {
+      if (rate < 0.3) continue;
+      const ea = $(`#${d.dc.id}-lb`), eb = $(`#${to}-lb`); if (!ea || !eb) continue;
+      const A = rel(ea), B = rel(eb), up = 34;
+      const sgn = (B.cx > A.cx) ? 1 : -1, ox = sgn * 14;
+      const p = `M${A.cx + ox},${A.y - 70} C${A.cx + ox},${up - 30} ${B.cx - ox},${up - 30} ${B.cx - ox},${B.y - 70}`;
+      out += `<path d="${p}" fill="none" stroke="#f0883e" stroke-width="2.5" stroke-dasharray="7 6" class="flow" marker-end="url(#ah)"/>`;
+      out += label((A.cx + B.cx) / 2, up - 16, [`failover ${d.dc.id} → ${to}`, `${fmt(rate)} req/s`], '#f0883e', `${[d.dc.id,to].sort().join('-')}`);
+    }
+  }
+  svg.innerHTML = `<defs><marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f0883e"/></marker></defs>` + out;
+}
+
+// ------------------------------------------------------------------ loop
+async function tick() {
+  try {
+    const r = await fetch('/api/state', {cache:'no-store'}); S = await r.json();
+    if (!DCS.length) { DCS = S.dcs; build(); } else DCS = S.dcs;
+    update();
+  } catch (e) { /* dashboard backend restarting */ }
+}
+$('#resetAll').onclick = () => act({op:'resetAll'}, 'RESET ALL');
+window.addEventListener('resize', () => DCS.length && drawLinks());
+tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>

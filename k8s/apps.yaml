@@ -1,0 +1,179 @@
+# ---------------------------------------------------------------------------
+# Application tier for one DC: payments-api, load balancer, WAN emulator, load generator, agent
+# (topology ConfigMap `dr-topology` is generated per DC by bin/dr)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata: { name: payments-api-all, namespace: dr }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # the LB does its own health checks and wants to see unready pods
+  selector: { app: payments-api }
+  ports: [{ name: http, port: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: payments-api, namespace: dr }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: payments-api } }
+  template:
+    metadata: { labels: { app: payments-api } }
+    spec:
+      containers:
+      - name: api
+        image: dr-payments-api:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - { name: DC_ID, value: __DC_ID__ }
+        - { name: DC_INDEX, value: "__DC_INDEX__" }
+        - { name: PEER_DCS, value: "__PEERS__" }
+        - { name: GG_ADDRS, value: "gg-ready:10800" }
+        - { name: ACCOUNTS_PER_DC, value: "5000" }
+        - { name: RETENTION_SEC, value: "90" }
+        ports: [{ containerPort: 8080 }]
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits: { cpu: "2", memory: 640Mi }
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          periodSeconds: 2
+          failureThreshold: 1
+          timeoutSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: { name: lb, namespace: dr }
+spec:
+  type: NodePort
+  selector: { app: lb }
+  ports:
+  - { name: http, port: 8080, targetPort: 8080, nodePort: 30700 }
+  - { name: admin, port: 9000, targetPort: 9000 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: lb, namespace: dr }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: lb } }
+  template:
+    metadata: { labels: { app: lb } }
+    spec:
+      containers:
+      - name: lb
+        image: dr-edge:latest
+        imagePullPolicy: IfNotPresent
+        args: ["lb"]
+        volumeMounts: [{ name: topo, mountPath: /etc/dr }]
+        resources: { requests: { cpu: 100m, memory: 64Mi }, limits: { memory: 256Mi } }
+      volumes: [{ name: topo, configMap: { name: dr-topology } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: wan, namespace: dr }
+spec:
+  selector: { app: wan }
+  ports:
+  - { name: admin, port: 9000 }
+  - { name: xdc2, port: 11802 }
+  - { name: xdc3, port: 11803 }
+  - { name: xdc1, port: 11801 }
+  - { name: lb1, port: 11701 }
+  - { name: lb2, port: 11702 }
+  - { name: lb3, port: 11703 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: wan, namespace: dr }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: wan } }
+  template:
+    metadata: { labels: { app: wan } }
+    spec:
+      containers:
+      - name: wan
+        image: dr-edge:latest
+        imagePullPolicy: IfNotPresent
+        args: ["wan"]
+        env: [{ name: DEFAULT_RTT_MS, value: "__DEFAULT_RTT__" }]
+        volumeMounts: [{ name: topo, mountPath: /etc/dr }]
+        resources: { requests: { cpu: 100m, memory: 64Mi }, limits: { memory: 256Mi } }
+      volumes: [{ name: topo, configMap: { name: dr-topology } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: loadgen, namespace: dr }
+spec:
+  selector: { app: loadgen }
+  ports: [{ name: admin, port: 9000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: loadgen, namespace: dr }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: loadgen } }
+  template:
+    metadata: { labels: { app: loadgen } }
+    spec:
+      containers:
+      - name: loadgen
+        image: dr-edge:latest
+        imagePullPolicy: IfNotPresent
+        args: ["loadgen"]
+        env:
+        - { name: TARGET, value: "http://lb:8080" }
+        - { name: TPS, value: "__TPS__" }
+        - { name: ACCOUNTS_PER_DC, value: "5000" }
+        volumeMounts: [{ name: topo, mountPath: /etc/dr }]
+        resources: { requests: { cpu: 100m, memory: 64Mi }, limits: { memory: 384Mi } }
+      volumes: [{ name: topo, configMap: { name: dr-topology } }]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: dc-agent, namespace: dr }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: dc-agent, namespace: dr }
+rules:
+- { apiGroups: [""], resources: ["pods", "services"], verbs: ["get", "list", "patch", "delete"] }
+- { apiGroups: [""], resources: ["pods/exec"], verbs: ["create"] }
+- { apiGroups: ["apps"], resources: ["statefulsets", "deployments"], verbs: ["get", "list", "patch", "update"] }
+- { apiGroups: ["apps"], resources: ["statefulsets/scale", "deployments/scale"], verbs: ["get", "patch", "update"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: dc-agent, namespace: dr }
+subjects: [{ kind: ServiceAccount, name: dc-agent, namespace: dr }]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: dc-agent }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: dc-agent, namespace: dr }
+spec:
+  type: NodePort
+  selector: { app: dc-agent }
+  ports: [{ name: http, port: 9090, targetPort: 9090, nodePort: 30900 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: dc-agent, namespace: dr }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: dc-agent } }
+  template:
+    metadata: { labels: { app: dc-agent } }
+    spec:
+      serviceAccountName: dc-agent
+      containers:
+      - name: agent
+        image: dr-edge:latest
+        imagePullPolicy: IfNotPresent
+        args: ["agent"]
+        env: [{ name: MAX_NODES, value: "__MAX_NODES__" }]
+        volumeMounts: [{ name: topo, mountPath: /etc/dr }]
+        resources: { requests: { cpu: 100m, memory: 64Mi }, limits: { memory: 256Mi } }
+      volumes: [{ name: topo, configMap: { name: dr-topology } }]

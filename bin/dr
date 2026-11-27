@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# dr — drive the GridGain 9.2 multi-DC (DCR) demo
+#
+#   bin/dr up          create 3 kind clusters (dc1 here, dc2+dc3 on llama.local), build, deploy, init, link with DCR
+#   bin/dr down        delete all three clusters
+#   bin/dr status      pods in every DC + replication state
+#   bin/dr dashboard   build and run the dashboard on http://localhost:8088
+#   bin/dr redeploy    rebuild images + re-apply manifests (keeps clusters and data)
+#   bin/dr link        (re)create DCR replications between all DCs
+#   bin/dr k <dc> ...  kubectl against one DC, e.g. bin/dr k dc2 get pods
+#   bin/dr urls        endpoints for curl / the dashboard
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+# shellcheck disable=SC1091
+source "$ROOT/topology.env"
+export KUBECONFIG="$ROOT/.kube/config"
+mkdir -p "$ROOT/.kube" "$ROOT/build"
+REMOTE_DIR="dr-demo"
+DR_IMAGES="dr-gridgain:9.2.0-b1 dr-payments-api:latest dr-edge:latest"
+# Initial RTTs between DCs (ms), roughly London/Frankfurt/New York
+declare_rtt() { case "$1-$2" in dc1-dc2|dc2-dc1) echo 15;; dc1-dc3|dc3-dc1) echo 75;; *) echo 90;; esac; }
+
+say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- topology helpers
+detect_ips() {
+  [ -n "${MAC_IP:-}" ] || MAC_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+  [ -n "${LLAMA_IP:-}" ] || LLAMA_IP=$(ssh -o BatchMode=yes "$LLAMA_HOST" "ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1")
+  [ -n "$MAC_IP" ] && [ -n "$LLAMA_IP" ] || die "could not detect MAC_IP / LLAMA_IP (set them in topology.env)"
+}
+each_dc() { local fn=$1; shift; for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"; "$fn" "$id" "$name" "$host" "$idx" "$@"; done; }
+host_ip() { [ "$1" = mac ] && echo "$MAC_IP" || echo "$LLAMA_IP"; }
+dc_field() { # id field
+  local id name host idx e
+  for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"; if [ "$id" = "$1" ]; then
+    case "$2" in name) echo "$name";; host) echo "$host";; idx) echo "$idx";; ip) host_ip "$host";; esac; fi; done
+}
+ctx() { echo "kind-$1"; }
+kcd() { local dc=$1; shift; kubectl --context "$(ctx "$dc")" "$@"; }
+agent_url() { echo "http://$(dc_field "$1" ip):$((18900 + $(dc_field "$1" idx)))"; }
+
+write_topology() { # $1 = self dc id -> JSON
+  local self=$1 first=1 id name host idx e
+  printf '{"self":"%s","dcs":[' "$self"
+  for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"
+    [ $first = 1 ] || printf ','; first=0
+    printf '{"id":"%s","name":"%s","index":%s,"hostIp":"%s","lbPort":%s,"xdcPort":%s,"agentPort":%s}' \
+      "$id" "${name//_/ }" "$idx" "$(host_ip "$host")" $((18700 + idx)) $((18800 + idx)) $((18900 + idx))
+  done
+  printf ']}\n'
+}
+
+on_host() { # host cmd...   run a command on the machine hosting a DC
+  local host=$1; shift
+  if [ "$host" = mac ]; then bash -c "$*"; else ssh -o BatchMode=yes "$LLAMA_HOST" "$*"; fi
+}
+
+# ---------------------------------------------------------------- clusters
+create_cluster() { # id name host idx
+  local id=$1 host=$3 idx=$4 ip; ip=$(host_ip "$host")
+  if on_host "$host" "kind get clusters 2>/dev/null | grep -qx $id"; then say "$id: kind cluster exists"; return; fi
+  say "$id: creating kind cluster on $host"
+  local cfg="$ROOT/build/kind-$id.yaml"
+  sed -e "s|__DC_ID__|$id|g;s|__API_PORT__|$((16440 + idx))|;s|__HOST_IP__|$ip|;s|__HOST_NAME__|$([ "$host" = mac ] && echo localhost || echo "$LLAMA_HOST")|" \
+      -e "s|__LB_PORT__|$((18700 + idx))|;s|__XDC_PORT__|$((18800 + idx))|;s|__AGENT_PORT__|$((18900 + idx))|" kind/dc-template.yaml > "$cfg"
+  if [ "$host" = mac ]; then kind create cluster --config "$cfg" --kubeconfig "$ROOT/.kube/kind-$id" >/dev/null
+  else
+    scp -q "$cfg" "$LLAMA_HOST:/tmp/kind-$id.yaml"
+    ssh "$LLAMA_HOST" "kind create cluster --config /tmp/kind-$id.yaml --kubeconfig /tmp/kind-$id.kubeconfig" >/dev/null
+  fi
+}
+
+collect_kubeconfig() { # id name host idx
+  local id=$1 host=$3 idx=$4
+  if [ "$host" = mac ]; then kind get kubeconfig --name "$id" > "$ROOT/.kube/kind-$id"
+  else ssh "$LLAMA_HOST" "kind get kubeconfig --name $id" | sed "s|server: https://.*|server: https://$LLAMA_IP:$((16440 + idx))|" > "$ROOT/.kube/kind-$id"; fi
+}
+merge_kubeconfigs() {
+  local files=""; for e in $DCS; do IFS='|' read -r id _ <<<"$e"; files="$files:$ROOT/.kube/kind-$id"; done
+  KUBECONFIG="${files#:}" kubectl config view --flatten > "$ROOT/.kube/config.new" && mv "$ROOT/.kube/config.new" "$ROOT/.kube/config"
+}
+
+# ---------------------------------------------------------------- images
+build_images() { # id name host idx   (once per host)
+  local host=$3
+  case " $BUILT " in *" $host "*) return;; esac; BUILT="$BUILT $host"
+  say "building images on $host"
+  local dir; if [ "$host" = mac ]; then dir="$ROOT"; else dir="\$HOME/$REMOTE_DIR"; fi
+  local build='set -e; cd "'"$dir"'"; docker build -q -t dr-gridgain:9.2.0-b1 --build-arg GG_IMAGE='"$GG_IMAGE"' images/gridgain >/dev/null; docker build -q -t dr-payments-api:latest payments-app >/dev/null; docker build -q -t dr-edge:latest edge >/dev/null'
+  if [ "$host" != mac ]; then
+    ssh "$LLAMA_HOST" "mkdir -p ~/$REMOTE_DIR"
+    rsync -a --delete --exclude secrets --exclude .kube --exclude build --exclude .git ./images ./payments-app ./edge "$LLAMA_HOST:~/$REMOTE_DIR/"
+  fi
+  on_host "$host" "$build"
+}
+load_images() { # id name host idx
+  local id=$1 host=$3
+  say "$id: loading images into kind"
+  on_host "$host" "for i in $DR_IMAGES; do kind load docker-image \$i --name $id >/dev/null; done"
+}
+
+# ---------------------------------------------------------------- deploy
+render() { # id file -> stdout
+  local id=$1 f=$2 idx peers="" e pid
+  idx=$(dc_field "$id" idx)
+  for e in $DCS; do IFS='|' read -r pid _ <<<"$e"; [ "$pid" = "$id" ] || peers="$peers,$pid"; done
+  sed -e "s|__GG_IMAGE__|dr-gridgain:9.2.0-b1|;s|__INITIAL_NODES__|$INITIAL_NODES|;s|__DC_ID__|$id|g;s|__DC_INDEX__|$idx|g" \
+      -e "s|__PEERS__|${peers#,}|;s|__MAX_NODES__|$MAX_NODES|;s|__TPS__|${LOAD_TPS:-8}|;s|__DEFAULT_RTT__|20|" "$f"
+}
+
+deploy_dc() { # id name host idx
+  local id=$1
+  say "$id: deploying"
+  kcd "$id" create namespace dr --dry-run=client -o yaml | kcd "$id" apply -f - >/dev/null
+  kcd "$id" -n dr create secret generic gg-license --from-file=secrets/gridgain-license.json --dry-run=client -o yaml | kcd "$id" apply -f - >/dev/null
+  write_topology "$id" > "$ROOT/build/topology-$id.json"
+  kcd "$id" -n dr create configmap dr-topology --from-file=topology.json="$ROOT/build/topology-$id.json" --dry-run=client -o yaml | kcd "$id" apply -f - >/dev/null
+  # snappier service discovery for the LB: CoreDNS caches records for 30s by default
+  kcd "$id" -n kube-system get cm coredns -o yaml | sed 's/cache 30/cache 2/' | kcd "$id" apply -f - >/dev/null 2>&1 || true
+  kcd "$id" -n kube-system rollout restart deploy/coredns >/dev/null 2>&1 || true
+  render "$id" k8s/gridgain.yaml | kcd "$id" apply -f - >/dev/null
+  render "$id" k8s/apps.yaml | kcd "$id" apply -f - >/dev/null
+}
+
+init_dc() { # id
+  local id=$1
+  say "$id: waiting for GridGain pods"
+  kcd "$id" -n dr wait --for=condition=Initialized pod/gg-0 pod/gg-1 pod/gg-2 --timeout=300s >/dev/null
+  until kcd "$id" -n dr exec gg-2 -- wget -qO- http://localhost:10300/management/v1/node/state >/dev/null 2>&1 &&
+        kcd "$id" -n dr exec gg-1 -- wget -qO- http://localhost:10300/management/v1/node/state >/dev/null 2>&1 &&
+        kcd "$id" -n dr exec gg-0 -- wget -qO- http://localhost:10300/management/v1/node/state >/dev/null 2>&1; do sleep 3; done
+  say "$id: initialising cluster + schema"
+  kcd "$id" -n dr exec gg-0 -- sh /ops/init-cluster.sh "$id"
+  kcd "$id" -n dr wait --for=condition=Ready pod/gg-0 pod/gg-1 pod/gg-2 --timeout=300s >/dev/null
+  kcd "$id" -n dr rollout status deploy/gg-cli --timeout=300s >/dev/null
+  local n=0
+  until kcd "$id" -n dr exec deploy/gg-cli -- docker-entrypoint.sh cli sql --jdbc-url jdbc:ignite:thin://gg-0.gg:10800 --file /ops/schema.sql >/dev/null 2>&1; do
+    n=$((n + 1)); [ $n -lt 30 ] || die "$id: schema creation failed"; sleep 4
+  done
+  # MVCC garbage collection: the working set is bounded by a short history window (90 s) and a 90 s payment retention.
+  # DCR resumes after an outage shorter than the window; after a longer one the agent rebuilds the replication
+  # (full state transfer from the surviving DCs).
+  kcd "$id" -n dr exec deploy/gg-cli -- docker-entrypoint.sh cli cluster config update --url http://gg-0.gg:10300 \
+      'ignite.gc {batchSize=500, lowWatermark {dataAvailabilityTimeMillis=90000, updateIntervalMillis=15000}}' >/dev/null 2>&1 || true
+  say "$id: waiting for payments-api (seeds accounts)"
+  kcd "$id" -n dr rollout status deploy/payments-api --timeout=300s >/dev/null
+}
+
+wait_agent() { # id
+  local url; url=$(agent_url "$1")
+  until curl -fs --max-time 3 "$url/status" >/dev/null 2>&1; do sleep 2; done
+}
+
+apply_latencies() {
+  say "applying inter-DC latencies"
+  for e in $DCS; do IFS='|' read -r a _ <<<"$e"; wait_agent "$a"
+    for f in $DCS; do IFS='|' read -r b _ <<<"$f"; [ "$a" = "$b" ] && continue
+      curl -fs -X POST "$(agent_url "$a")/action" -d "{\"op\":\"setLink\",\"peer\":\"$b\",\"rttMs\":$(declare_rtt "$a" "$b"),\"down\":false}" >/dev/null || true
+    done
+  done
+}
+
+link_dcs() {
+  apply_latencies
+  say "creating Data Center Replication (full mesh, active/active)"
+  for e in $DCS; do IFS='|' read -r a _ <<<"$e"
+    curl -s -X POST "$(agent_url "$a")/action" -d '{"op":"setupDCR"}' | head -c 1500; echo
+  done
+}
+
+# ---------------------------------------------------------------- commands
+cmd_up() {
+  detect_ips
+  for tool in docker kind kubectl; do command -v $tool >/dev/null || die "$tool not found"; done
+  ssh -o BatchMode=yes "$LLAMA_HOST" 'command -v kind docker >/dev/null' || die "kind/docker missing on $LLAMA_HOST"
+  [ -f secrets/gridgain-license.json ] || die "put an ULTIMATE/ENTERPRISE GridGain 9 licence at secrets/gridgain-license.json (DCR needs it)"
+  say "Mac=$MAC_IP  llama=$LLAMA_IP"
+  local free; free=$(ssh -o BatchMode=yes "$LLAMA_HOST" "df -BG --output=avail / | tail -1 | tr -dc 0-9")
+  [ "${free:-0}" -ge 25 ] || die "only ${free}G free on $LLAMA_HOST (need >= 25G for two GridGain clusters)"
+  BUILT=""; each_dc create_cluster
+  each_dc collect_kubeconfig; merge_kubeconfigs
+  BUILT=""; each_dc build_images
+  each_dc load_images
+  each_dc deploy_dc
+  for e in $DCS; do IFS='|' read -r id _ <<<"$e"; init_dc "$id" & done; wait
+  link_dcs
+  cat <<EOF
+
+$(printf '\033[1;32mAll three data centres are up.\033[0m')  Start the dashboard with:  bin/dr dashboard
+EOF
+  cmd_urls
+}
+
+cmd_redeploy() {
+  detect_ips; BUILT=""; each_dc build_images; each_dc load_images; each_dc deploy_dc
+  for e in $DCS; do IFS='|' read -r id _ <<<"$e"; kcd "$id" -n dr rollout restart deploy/payments-api deploy/lb deploy/wan deploy/loadgen deploy/dc-agent >/dev/null; done
+  for e in $DCS; do IFS='|' read -r id _ <<<"$e"; kcd "$id" -n dr rollout status deploy/wan deploy/dc-agent --timeout=300s >/dev/null; done
+  apply_latencies   # the WAN emulators restart with the default RTT
+}
+
+cmd_down() {
+  detect_ips
+  for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"; say "$id: deleting cluster"; on_host "$host" "kind delete cluster --name $id" || true; done
+  rm -f "$ROOT"/.kube/*
+}
+
+cmd_status() {
+  detect_ips
+  for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"
+    printf '\n\033[1m%s (%s, %s)\033[0m\n' "$id" "$name" "$host"
+    kcd "$id" -n dr get pods -o wide --no-headers 2>&1 | awk '{printf "  %-28s %-6s %-10s %s\n",$1,$2,$3,$6}'
+    curl -s --max-time 3 "$(agent_url "$id")/status" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin); print("  cluster:",d["cluster"]["status"],"| lb:",d["lb"].get("rps"),"rps p99",d["lb"].get("p99ms"),"ms | lag:",d.get("repLagMs"))
+    for r in d["dcr"].get("replications",[]): print("  dcr:",r)
+except Exception as e: print("  agent not reachable yet")'
+  done
+}
+
+cmd_urls() {
+  detect_ips
+  echo
+  for e in $DCS; do IFS='|' read -r id name host idx <<<"$e"
+    echo "  $id ($name): LB http://$(host_ip "$host"):$((18700 + idx))   agent http://$(host_ip "$host"):$((18900 + idx))/status"
+  done
+  echo "  dashboard:   http://localhost:8088   (bin/dr dashboard)"
+  echo
+  echo "  try:  curl -s -XPOST http://$(host_ip mac):18701/payments -d '{\"id\":\"demo-1\",\"from\":100001,\"to\":100002,\"amount\":\"5.00\",\"origin\":\"dc1\"}'"
+  echo "        curl -s http://$(host_ip "$(dc_field dc3 host)"):18703/payments/demo-1     # read it back from another DC"
+}
+
+cmd_dashboard() {
+  detect_ips
+  mkdir -p build
+  write_topology dc1 > build/dashboard-topology.json
+  (cd dashboard && go build -o ../build/dr-dashboard .)
+  say "dashboard on http://localhost:8088"
+  exec build/dr-dashboard -topology build/dashboard-topology.json -listen :8088
+}
+
+case "${1:-}" in
+  up) cmd_up;;
+  down) cmd_down;;
+  status) cmd_status;;
+  redeploy) cmd_redeploy;;
+  link) detect_ips; link_dcs;;
+  dashboard) cmd_dashboard;;
+  urls) cmd_urls;;
+  k) shift; dc=$1; shift; kcd "$dc" -n dr "$@";;
+  *) sed -n '2,12p' "$0"; exit 1;;
+esac
